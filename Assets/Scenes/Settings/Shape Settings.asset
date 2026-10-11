@@ -1,0 +1,79 @@
+%YAML 1.1
+%TAG !u! tag:unity3d.com,2011:
+--- !u!114 &11400000
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 0}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: 9b1546d50f4dd49158b7b1d02bc060ce, type: 3}
+  m_Name: Shape Settings
+  m_EditorClassIdentifier: Assembly-CSharp::ShapeSettings
+  planetRadius: 10000
+  noiseLayers:
+  - enabled: 1
+    useFirstLayerAsMask: 0
+    noiseSettings:
+      filterType: 0
+      simpleNoiseSettings:
+        strength: 0.007
+        numLayers: 8
+        baseRoughness: 5
+        roughness: 2.23
+        persistence: 0.5
+        centre: {x: 3.11, y: 0.92, z: -0.39}
+        minValue: 0.98
+      ridgidNoiseSettings:
+        strength: 0
+        numLayers: 1
+        baseRoughness: 3
+        roughness: 1
+        persistence: 0.5
+        centre: {x: 0, y: 1, z: 3}
+        minValue: 0
+        weightMultiplier: 0.8
+  - enabled: 1
+    useFirstLayerAsMask: 0
+    noiseSettings:
+      filterType: 0
+      simpleNoiseSettings:
+        strength: 0.002
+        numLayers: 8
+        baseRoughness: 1
+        roughness: 2.2
+        persistence: 0.5
+        centre: {x: 0, y: 0, z: 0}
+        minValue: 0
+      ridgidNoiseSettings:
+        strength: 0
+        numLayers: 2
+        baseRoughness: 2
+        roughness: 2
+        persistence: 0
+        centre: {x: 1, y: 3, z: 4}
+        minValue: 0
+        weightMultiplier: 2
+  - enabled: 1
+    useFirstLayerAsMask: 0
+    noiseSettings:
+      filterType: 0
+      simpleNoiseSettings:
+        strength: 0.002
+        numLayers: 8
+        baseRoughness: 1
+        roughness: 2.2
+        persistence: 0.5
+        centre: {x: 0, y: 0, z: 0}
+        minValue: 0
+      ridgidNoiseSettings:
+        strength: 0
+        numLayers: 2
+        baseRoughness: 2
+        roughness: 2
+        persistence: 0
+        centre: {x: 1, y: 3, z: 4}
+        minValue: 0
+        weightMultiplier: 2

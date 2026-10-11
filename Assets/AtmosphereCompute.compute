@@ -1,0 +1,382 @@
+// Kernels
+#pragma kernel DiffuseVel
+#pragma kernel DiffuseDen
+#pragma kernel Pressure
+#pragma kernel AdvVel
+#pragma kernel AdvDen
+#pragma kernel SubtractGrad
+#pragma kernel Divergence
+#pragma kernel InitVel
+#pragma kernel InitDen
+#pragma kernel Confine
+#pragma kernel Vorticity
+#pragma kernel Force
+#pragma kernel Buoyancy
+
+
+#include "CurlNoise.compute"
+
+
+// Multigas
+float4 rho04, H4, mass4;
+float gravity;
+
+// Vort
+RWTexture3D<float4> Vort;
+float confine;
+
+// External Forces
+float time;
+float forceFreq;
+float forceAmp;
+float forceSpeed;
+float drag;
+
+// Density Init vars
+float rho0;
+float H;
+
+// Vel noise
+float freq;
+float amplitude;
+float3 seed;
+
+// Diffuse RHS
+Texture3D<float4> VelRHS;
+Texture3D<float4> DenRHS;
+
+// Advect, and other stuff;s vel
+Texture3D<float4> VelIn;
+RWTexture3D<float4> VelOut;
+RWTexture3D<float4> Den;
+Texture3D<float4> DenIn;
+RWTexture3D<float4> DenOut;
+float denRelax;
+// Vel for the Splat
+RWTexture3D<float4> Vel;
+RWTexture3D<float> Div;
+
+float diffA;
+float visc;
+float omega;
+
+float dt;
+
+SamplerState sampler_linear_clamp;
+RWTexture3D<float> P;
+
+static const int3 EX = int3(1,0,0);
+static const int3 EY = int3(0,1,0);
+static const int3 EZ = int3(0,0,1);
+
+// For red-black Gaussian_Seidlel
+int color;
+
+// Planet rad
+float rPlanet, rAtm;
+int3 size;
+
+bool OutsideAtm(int3 p)
+{
+    if (any(p < 0) || any(p >= size)) return true;
+    return length((p + 0.5) / size - 0.5) > rAtm;
+}
+
+bool InsidePlanet(int3 p)
+{
+    return length((p+0.5) / size - 0.5) < rPlanet;
+}
+
+// Neighbor check
+// when neighbor is outside atm return the c vel
+// when neighbor is inside atm return flipped vel
+float3 VN(int3 c, int3 n)
+{
+    int3 q = c + n;
+    if (OutsideAtm(q))
+        return Vel[c].xyz;
+    if (InsidePlanet(q))
+        return Vel[c].xyz * (1 - 2 * abs((float3)n));
+
+    return Vel[q].xyz;
+}
+
+// Outisde of the planet is a vent (0)
+// Inside planet is the c pres
+float PN(int3 c, int3 n)
+{
+    int3 q = c + n;
+    if (OutsideAtm(q)) return 0;
+    if (InsidePlanet(q)) return P[c];
+
+    return P[q];
+}
+
+float4 RhoBg(float r)
+{
+   return rho04 * exp(-(r - rPlanet) / H4);
+}
+
+// Inside return 0
+// Outside return the denisty of c
+float4 DenN(int3 c, int3 n)
+{
+    int3 q = c + n;
+    if (InsidePlanet(q)) return 0;
+    if (OutsideAtm(q)) return Den[c];
+
+    return Den[q];
+}
+
+// Shares its velocity to the neighbors
+// only is used when vsic > 0
+[numthreads(8,8,8)]
+void DiffuseVel(uint3 ID : SV_DispatchThreadID)
+{
+    int y = ID.y, z = ID.z;
+    int x = 2 * ID.x + ((y + z + color) & 1);
+    if (any(int3(x, y, z) >= size)) return;
+    int3 c = int3(x, y, z);
+
+    if (OutsideAtm(c) || InsidePlanet(c))
+    {
+        Vel[c] = 0;
+        return;
+    }
+    
+    float3 v = Vel[c].xyz;
+
+    float3 sum = VN(c, -EX)+VN(c,EX)+VN(c,-EY)+VN(c,EY)+VN(c, -EZ)+VN(c,EZ);
+    float3 gs = (VelRHS[c].xyz + diffA * sum) / (1.0 + 6.0 * diffA);
+    Vel[c] = float4(lerp(v, gs, omega), 0);
+}
+
+// Same thing but for density
+[numthreads(8,8,8)]
+void DiffuseDen(uint3 ID : SV_DispatchThreadID)
+{
+    int y = ID.y, z = ID.z;
+    int x = 2 * ID.x + ((y + z + color) & 1);
+    if (any(int3(x, y, z) >= size)) return;
+    int3 c = int3(x, y, z);
+
+    if (OutsideAtm(c) || InsidePlanet(c))
+    {
+        Den[c] = 0;
+        return;
+    }
+
+    float4 d = Den[c];
+
+    float4 sum = DenN(c, EX) + DenN(c, -EX) + DenN(c, EY) + DenN(c, -EY) + DenN(c, EZ) + DenN(c, -EZ);
+    float4 gs = (DenRHS[c] + diffA * sum) / (1.0 + 6.0 * diffA);
+    Den[c] = lerp(d, gs, omega);
+}
+
+// Trace back to find out what the next vel shld be
+[numthreads(8,8,8)]
+void AdvVel(uint3 ID : SV_DispatchThreadID)
+{
+    if (any(int3(ID) >= size)) return;
+
+    int3 c = int3(ID);
+    if (OutsideAtm(c) || InsidePlanet(c))
+    {
+        VelOut[c] = 0;
+        return;
+    }
+
+    float3 v = VelIn.Load(int4(ID,0)).xyz;
+    float3 src = (ID + 0.5) - dt * size.x * v;
+    VelOut[c] = VelIn.SampleLevel(sampler_linear_clamp, src / size, 0);
+}
+// same thing btu for den
+[numthreads(8,8,8)]
+void AdvDen(uint3 ID : SV_DispatchThreadID)
+{
+    if (any(int3(ID) >= size)) return;
+
+    int3 c = int3(ID);
+    if (OutsideAtm(c) || InsidePlanet(c))
+    {
+        DenOut[c] = 0;
+        return;
+    }
+
+    float3 v = VelIn.Load(int4(ID, 0)).xyz;
+    float3 src = (ID + 0.5) - dt * size.x * v;
+    float4 d = DenIn.SampleLevel(sampler_linear_clamp, src / size, 0);
+    float r = length((c + 0.5) / size - 0.5);
+    DenOut[c] = lerp(d, RhoBg(r), saturate(dt * denRelax));
+}
+
+
+[numthreads(8,8,8)]
+void SubtractGrad(uint3 ID : SV_DispatchThreadID)
+{
+    if (any(int3(ID) >= size)) return;
+
+    int3 c = int3(ID);
+    if (InsidePlanet(c) || OutsideAtm(c))
+    {
+        Vel[c] = 0;
+        return;
+    }
+    float3 grad = float3(PN(c,EX) - PN(c,-EX), PN(c,EY) - PN(c,-EY), PN(c,EZ) - PN(c,-EZ));
+    float3 v = Vel[c].xyz - 0.5 * grad;
+
+    if (InsidePlanet(c+EX) && v.x > 0) v.x = 0;
+    if (InsidePlanet(c-EX) && v.x < 0) v.x = 0;
+    if (InsidePlanet(c+EY) && v.y > 0) v.y = 0;
+    if (InsidePlanet(c-EY) && v.y < 0) v.y = 0;
+    if (InsidePlanet(c+EZ) && v.z > 0) v.z = 0;
+    if (InsidePlanet(c-EZ) && v.z < 0) v.z = 0;
+
+    Vel[c] = float4(v, 0);
+}
+
+// Calc divergence
+[numthreads(8,8,8)]
+void Divergence(uint3 ID : SV_DispatchThreadID)
+{
+    if (any(int3(ID) >= size)) return;
+
+    int3 c = int3(ID);
+    if (InsidePlanet(c) || OutsideAtm(c))
+    {
+        Div[c] = 0;
+        return;
+    }
+
+    float vl = VN(c, -EX).x, vr = VN(c, EX).x;
+    float vd = VN(c, -EY).y, vu = VN(c, EY).y;
+    float vb = VN(c, -EZ).z, vf = VN(c, EZ).z;
+
+    Div[c] = 0.5 * (vr - vl + vu - vd + vf - vb);
+}
+
+[numthreads(8,8,8)]
+void InitDen(uint3 ID: SV_DispatchThreadID)
+{
+    if (any(int3(ID) >= size)) return;
+    int3 c = int3(ID);
+
+    if (InsidePlanet(c) || OutsideAtm(c))
+    {
+        Den[c] = 0;
+        return;
+    }
+
+    float r = length((c + 0.5) / size - 0.5);
+    float3 p = c * freq + seed;
+    float4 n = float4(snoise(p), snoise(p + 13.1), snoise(p + 27.7), snoise(p + 41.3));
+    Den[c] = RhoBg(r) * (1.0 + 0.3 * n);
+}
+
+[numthreads(8,8,8)]
+void InitVel(uint3 ID : SV_DispatchThreadID)
+{
+    if (any(int3(ID) >= size)) return;
+    int3 c = int3(ID);
+
+    if (InsidePlanet(c) || OutsideAtm(c))
+    {
+        Vel[c] = 0;
+        return;
+    }
+    
+    float3 v = curlNoise(c * freq + seed) * amplitude;
+    Vel[c] = float4(v,0);
+}
+
+// Red black gaussian seidlel sweep solving the lap p = div
+[numthreads(8,8,8)]
+void Pressure(uint3 ID : SV_DispatchThreadID)
+{
+    int y = ID.y, z = ID.z;
+    int x = 2 * ID.x + ((y + z + color) & 1);
+    if (any(int3(x, y, z) >= size)) return;
+    int3 c = int3(x,y,z);
+
+    if (InsidePlanet(c) || OutsideAtm(c))
+    {
+        P[c] = 0;
+        return;
+    }
+
+    float sum = PN(c, -EX) + PN(c, EX) + PN(c, -EY) + PN(c, EY) + PN(c, -EZ) + PN(c, EZ);
+    float gs = (sum - Div[c]) / 6.0;
+    P[c] = lerp(P[c], gs, omega);
+}
+
+float VM(int3 c, int3 n)
+{
+    int3 q = c +n;
+    if (OutsideAtm(q) || InsidePlanet(q)) return Vort[c].w;
+    return Vort[q].w;
+}
+
+[numthreads(8,8,8)]
+void Vorticity(uint3 ID : SV_DispatchThreadID)
+{
+    if (any(int3(ID) >= size)) return;
+    int3 c = int3(ID);
+    if (InsidePlanet(c) || OutsideAtm(c))
+    {
+        Vort[c] = 0;
+        return;
+    }
+
+    float3 xm = VN(c,-EX), xp = VN(c,EX);
+    float3 ym = VN(c,-EY), yp = VN(c,EY);
+    float3 zm = VN(c,-EZ), zp = VN(c,EZ);
+    float3 w = 0.5 * float3((yp.z - ym.z) - (zp.y - zm.y), (zp.x - zm.x) - (xp.z - xm.z), (xp.y - xm.y) - (yp.x - ym.x));
+    Vort[c] = float4(w, length(w));
+}
+
+[numthreads(8,8,8)]
+void Confine(uint3 ID : SV_DispatchThreadID)
+{
+    if (any(int3(ID) >= size)) return;
+    int3 c = int3(ID);
+    if (InsidePlanet(c) || OutsideAtm(c)) return;
+
+    float3 eta = 0.5 * float3(VM(c,EX) - VM(c,-EX), VM(c,EY) - VM(c,-EY), VM(c,EZ) - VM(c,-EZ));
+    float l = length(eta);
+    if (l < 1e-6) return;
+
+    float3 f = confine * cross(eta / l, Vort[c].xyz);
+    Vel[c] = float4(Vel[c].xyz + dt * f, 0);
+}
+
+[numthreads(8,8,8)]
+void Force(uint3 ID : SV_DispatchThreadID)
+{
+    if (any(int3(ID) >= size)) return;
+    int3 c = int3(ID);
+    if (InsidePlanet(c) || OutsideAtm(c)) return;
+
+    float3 p = c * forceFreq + seed + float3(0, 0, time * forceSpeed);
+    float3 f = curlNoise(p) * forceAmp;
+
+    float3 v = Vel[c].xyz * (1.0 - dt * drag) + dt * f;
+    Vel[c] = float4(v, 0);
+}
+
+[numthreads(8,8,8)]
+void Buoyancy(uint3 ID : SV_DispatchThreadID)
+{
+    if (any(int3(ID) >= size)) return;
+    int3 c = int3(ID);
+    if (InsidePlanet(c) || OutsideAtm(c)) return;
+
+    float3 pos = (c + 0.5) / size - 0.5;
+    float r = length(pos);
+
+    float rho = dot(mass4, Den[c]);
+    float rhoBg = dot(mass4, RhoBg(r));
+    float dev = (rho - rhoBg) / max(rhoBg, 1e-5);
+
+    float3 up = pos / max(r, 1e-5);
+    Vel[c] = float4(Vel[c].xyz - dt * gravity * dev * up, 0);
+}
